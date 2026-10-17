@@ -1,5 +1,5 @@
-# 01: Enterprise Sliding Window Rate Limiter and Circuit Breaker
-**Status:** ready-for-agent
+﻿# 01: Enterprise Sliding Window Rate Limiter and Circuit Breaker
+**Status:** done
 **Blocked by:** None
 **Priority:** High
 **Owner:** 5090 Blackwell (:8877) + Double-Blind Audit (:8080)
@@ -44,4 +44,5 @@ Implement a zero-dependency, production-grade Sliding Window Token Rate Limiter 
   - Circuit breaker fast-fail when OPEN with fallback invocation.
   - Circuit breaker recovery through HALF_OPEN to CLOSED.
 - Tests must pass cleanly with `npm test` / `node --test` (Exit code 0).
+
 
