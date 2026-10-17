@@ -14,3 +14,11 @@
 {"ts":1792240275398,"level":"info","event":"skill.probe","fields":{"name":"setup-matt-pocock-skills","level":"ok","via":"registry"}}
 {"ts":1792240275398,"level":"info","event":"skill.probe","fields":{"name":"ask-matt","level":"ok","via":"registry"}}
 {"ts":1792240280382,"level":"warn","event":"host.call.fail","fields":{"method":"deck.agentRegister","kind":"deck-tool","errorHash":"4eef057e","errorKind":"missing-dep"}}
+{"ts":1792240406563,"level":"error","event":"host.dispatch.error","fields":{"method":"/api/dsws 通道注册","argsHash":"","errorKind":"internal"}}
+{"ts":1792240406595,"level":"info","event":"host.start","fields":{"pid":11472,"startedAt":"2026-10-17T12:33:26.595Z","dir":"C:\\Users\\5216p\\Projects\\resilient-rate-limiter\\.dsh-mattskillsdeck-cache"}}
+{"ts":1792240407345,"level":"warn","event":"log.persist.fail","fields":{"op":"readBack","reason":"read-fail","dirHash":"00001505"}}
+{"ts":1792240411500,"level":"info","event":"registry.select","fields":{"cwdHash":"8d0e4cf7","backendId":"","source":"fallback","latencyMs":181,"caller":"detection-service"}}
+{"ts":1792240411525,"level":"info","event":"skill.probe","fields":{"name":"wayfinder","level":"ok","via":"registry"}}
+{"ts":1792240411525,"level":"info","event":"skill.probe","fields":{"name":"setup-matt-pocock-skills","level":"ok","via":"registry"}}
+{"ts":1792240411526,"level":"info","event":"skill.probe","fields":{"name":"ask-matt","level":"ok","via":"registry"}}
+{"ts":1792240416618,"level":"warn","event":"host.call.fail","fields":{"method":"deck.agentRegister","kind":"deck-tool","errorHash":"4eef057e","errorKind":"missing-dep"}}
