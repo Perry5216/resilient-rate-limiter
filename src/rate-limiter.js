@@ -26,8 +26,10 @@ export class SlidingWindowRateLimiter {
 
     /** @type {Map<number, number>} bucketIndex -> token count */
     this.buckets = new Map();
-    /** @type {Array<{tokens: number, resolve: (v: boolean) => void, reject: (e: Error) => void, deadlineMs: number}>} FIFO waiters */
+    /** @type {Array<{tokens: number, deadlineMs: number, resolve: (v: boolean) => void, reject: (e: Error) => void}>} FIFO waiters */
     this.queue = [];
+    /** @type {NodeJS.Timeout | null} */
+    this._drainTimer = null;
   }
 
   _nowMs() {
@@ -42,8 +44,6 @@ export class SlidingWindowRateLimiter {
   _evict(nowMs) {
     const oldestAllowedIndex = this._bucketIndex(nowMs - this.windowMs);
     for (const index of this.buckets.keys()) {
-      // A bucket is live while its expiry (indexStart + bucketWidth) is still
-      // inside the window; buckets at or before the window's left edge are gone.
       if (index <= oldestAllowedIndex) this.buckets.delete(index);
     }
   }
@@ -71,7 +71,9 @@ export class SlidingWindowRateLimiter {
   }
 
   /**
-   * Immediate decision. Returns { allowed, remaining, resetMs }.
+   * Immediate capacity decision.
+   * @param {number} tokens
+   * @returns {{ allowed: boolean, remaining: number, resetMs: number }}
    */
   tryAcquire(tokens = 1) {
     if (!Number.isInteger(tokens) || tokens <= 0) throw new Error('tokens must be a positive integer');
@@ -89,43 +91,35 @@ export class SlidingWindowRateLimiter {
   }
 
   /**
-   * Queue-and-wait acquisition. Resolves `true` when capacity opens; rejects
-   * with Error('Rate limit acquire timed out') if `timeoutMs` expires.
-   *
-   * Production path uses real timers against the injected clock. When the clock
-   * is virtual (tests), the queue is drained synchronously at a microtask
-   * checkpoint after the clock advances (ADR 0002).
+   * Schedules next timer-driven queue drain based on earliest capacity opening or deadline.
    */
-  async acquire(tokens = 1, timeoutMs = 5000) {
-    if (!Number.isInteger(tokens) || tokens <= 0) throw new Error('tokens must be a positive integer');
+  _scheduleWakeup(deadlineMs = Infinity) {
+    if (this.queue.length === 0) return;
+    if (this._drainTimer) {
+      clearTimeout(this._drainTimer);
+      this._drainTimer = null;
+    }
 
-    const immediate = this.tryAcquire(tokens);
-    if (immediate.allowed) return true;
+    const nowMs = this._nowMs();
+    const reset = this._resetMs(nowMs, this._load(nowMs));
+    const nextEarliestDeadline = this.queue.reduce((min, w) => Math.min(min, w.deadlineMs), deadlineMs);
+    const targetTime = Math.min(nextEarliestDeadline, nowMs + (reset > 0 ? reset : this.bucketWidthMs));
+    const delayMs = Math.max(1, Math.ceil(targetTime - nowMs));
 
-    const deadlineMs = this._nowMs() + timeoutMs;
-    const waiter = { tokens, deadlineMs, resolve: null, reject: null };
+    this._drainTimer = setTimeout(() => {
+      this._drainTimer = null;
+      this.drain();
+    }, delayMs);
 
-    return new Promise((resolve, reject) => {
-      waiter.resolve = resolve;
-      waiter.reject = reject;
-      this.queue.push(waiter);
-
-      const isVirtualClock = this.nowFn !== hrtimeMs;
-      if (isVirtualClock) {
-        // Microtask checkpoint: tests advance the virtual clock, then drain.
-        queueMicrotask(() => this._drainQueue());
-      } else {
-        // Real clock: schedule a wake-up at the earlier of bucket expiry and deadline.
-        const nowMs = this._nowMs();
-        const wakeMs = Math.min(deadlineMs, nowMs + this._resetMs(nowMs, this._load(nowMs)));
-        const timer = setTimeout(() => this._drainQueue(), Math.max(0, wakeMs - nowMs));
-        if (typeof timer.unref === 'function') timer.unref();
-      }
-    });
+    if (typeof this._drainTimer.unref === 'function') {
+      this._drainTimer.unref();
+    }
   }
 
-  /** Drain the FIFO queue against the current clock; called at bucket expiry / deadline. */
-  _drainQueue() {
+  /**
+   * Public queue evaluation: processes FIFO queue against current time.
+   */
+  drain() {
     if (this.queue.length === 0) return;
     const nowMs = this._nowMs();
 
@@ -144,17 +138,30 @@ export class SlidingWindowRateLimiter {
         waiter.resolve(true);
         continue;
       }
-      break; // head-of-line waiter cannot proceed yet; FIFO order preserved
+      break;
     }
 
-    // If work remains, schedule the next wake-up (real clocks only).
-    if (this.queue.length > 0 && this.nowFn !== hrtimeMs) {
-      const after = this._nowMs();
-      const head = this.queue[0];
-      const wakeMs = Math.min(head.deadlineMs, after + this._resetMs(after, this._load(after)));
-      const timer = setTimeout(() => this._drainQueue(), Math.max(0, wakeMs - after));
-      if (typeof timer.unref === 'function') timer.unref();
+    if (this.queue.length > 0) {
+      this._scheduleWakeup();
     }
+  }
+
+  /**
+   * Queue-and-wait acquisition. Resolves `true` when capacity opens; rejects
+   * with Error('Rate limit acquire timed out') if `timeoutMs` expires.
+   */
+  async acquire(tokens = 1, timeoutMs = 5000) {
+    if (!Number.isInteger(tokens) || tokens <= 0) throw new Error('tokens must be a positive integer');
+
+    const immediate = this.tryAcquire(tokens);
+    if (immediate.allowed) return true;
+
+    const deadlineMs = this._nowMs() + timeoutMs;
+
+    return new Promise((resolve, reject) => {
+      this.queue.push({ tokens, deadlineMs, resolve, reject });
+      this._scheduleWakeup(deadlineMs);
+    });
   }
 
   getStats() {

@@ -45,6 +45,7 @@ export class CircuitBreaker extends EventEmitter {
     this.state = CircuitState.CLOSED;
     this.lastStateChangeMs = this.nowFn();
     this.consecutiveHalfOpenSuccesses = 0;
+    this.activeHalfOpenProbes = 0;
 
     /** @type {boolean[]} Ring buffer of last outcomes (true = success, false = failure) */
     this.ringBuffer = [];
@@ -68,11 +69,14 @@ export class CircuitBreaker extends EventEmitter {
 
     if (newState === CircuitState.HALF_OPEN) {
       this.consecutiveHalfOpenSuccesses = 0;
+      this.activeHalfOpenProbes = 0;
     } else if (newState === CircuitState.CLOSED) {
       this.ringBuffer = [];
       this.consecutiveHalfOpenSuccesses = 0;
+      this.activeHalfOpenProbes = 0;
     } else if (newState === CircuitState.OPEN) {
       this.consecutiveHalfOpenSuccesses = 0;
+      this.activeHalfOpenProbes = 0;
       this.emit('trip', { timestamp: now });
     }
 
@@ -88,30 +92,41 @@ export class CircuitBreaker extends EventEmitter {
     }
   }
 
-  _recordOutcome(success) {
-    this.ringBuffer.push(success);
+  _recordOutcome(isSuccess) {
+    this.ringBuffer.push(isSuccess);
     if (this.ringBuffer.length > this.minimumRequests) {
       this.ringBuffer.shift();
     }
+  }
+
+  _computeFailureStats() {
+    const totalRecorded = this.ringBuffer.length;
+    const failures = this.ringBuffer.filter((outcome) => !outcome).length;
+    const successes = totalRecorded - failures;
+    const failurePct = totalRecorded > 0 ? (failures / totalRecorded) * 100 : 0;
+    return { totalRecorded, successes, failures, failurePct };
   }
 
   _shouldTrip() {
     if (this.ringBuffer.length < this.minimumRequests) {
       return false;
     }
-    const failures = this.ringBuffer.filter((s) => !s).length;
-    const failurePct = (failures / this.ringBuffer.length) * 100;
+    const { failurePct } = this._computeFailureStats();
     return failurePct >= this.failureThresholdPct;
   }
 
   /**
    * Execute an operation protected by the circuit breaker.
    *
-   * @param {() => Promise<any> | any} actionFn
-   * @param {((error: Error) => Promise<any> | any) | null} fallbackFn
-   * @returns {Promise<any>}
+   * @param {() => Promise<unknown> | unknown} actionFn
+   * @param {((error: Error) => Promise<unknown> | unknown) | null} fallbackFn
+   * @returns {Promise<unknown>}
    */
   async execute(actionFn, fallbackFn = null) {
+    if (typeof actionFn !== 'function') {
+      throw new TypeError('actionFn must be a callable function');
+    }
+
     this._checkRecoveryTimeout();
 
     if (this.state === CircuitState.OPEN) {
@@ -122,16 +137,25 @@ export class CircuitBreaker extends EventEmitter {
       throw openError;
     }
 
+    if (this.state === CircuitState.HALF_OPEN) {
+      this.activeHalfOpenProbes++;
+    }
+
     try {
       const result = await actionFn();
       this._handleSuccess();
       return result;
     } catch (err) {
-      this._handleFailure(err);
+      const errorObj = err instanceof Error ? err : new Error(String(err));
+      this._handleFailure(errorObj);
       if (typeof fallbackFn === 'function') {
-        return await fallbackFn(err);
+        return await fallbackFn(errorObj);
       }
-      throw err;
+      throw errorObj;
+    } finally {
+      if (this.state === CircuitState.HALF_OPEN && this.activeHalfOpenProbes > 0) {
+        this.activeHalfOpenProbes--;
+      }
     }
   }
 
@@ -164,15 +188,13 @@ export class CircuitBreaker extends EventEmitter {
   }
 
   getMetrics() {
-    const totalRecorded = this.ringBuffer.length;
-    const failures = this.ringBuffer.filter((s) => !s).length;
-    const successes = totalRecorded - failures;
+    const { totalRecorded, successes, failures, failurePct } = this._computeFailureStats();
     return {
       state: this.state,
       totalRecorded,
       successes,
       failures,
-      failurePct: totalRecorded > 0 ? (failures / totalRecorded) * 100 : 0
+      failurePct
     };
   }
 }

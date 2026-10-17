@@ -52,6 +52,28 @@ describe('SlidingWindowRateLimiter', () => {
     assert.equal(limiter.tryAcquire(1).allowed, false);
   });
 
+  it('handles async acquire resolution via public drain', async () => {
+    let currentTime = 1000.0;
+    const limiter = new SlidingWindowRateLimiter({
+      limit: 1,
+      windowMs: 500,
+      granularBuckets: 5,
+      nowFn: () => currentTime
+    });
+
+    assert.equal(limiter.tryAcquire(1).allowed, true);
+
+    // Queue second request
+    const acquirePromise = limiter.acquire(1, 1000);
+
+    // Advance time past expiry and call public drain()
+    currentTime += 600;
+    limiter.drain();
+
+    const acquired = await acquirePromise;
+    assert.equal(acquired, true, 'Queued acquire should resolve to true once capacity opens');
+  });
+
   it('handles async acquire timeout rejection', async () => {
     let currentTime = 1000.0;
     const limiter = new SlidingWindowRateLimiter({
@@ -67,12 +89,29 @@ describe('SlidingWindowRateLimiter', () => {
 
     // Advance time past deadline
     currentTime += 150;
-    limiter._drainQueue();
+    limiter.drain();
 
     await assert.rejects(acquirePromise, {
       name: 'Error',
       message: 'Rate limit acquire timed out'
     });
+  });
+
+  it('resolves real-clock acquire automatically with real timer', async () => {
+    const limiter = new SlidingWindowRateLimiter({
+      limit: 1,
+      windowMs: 50,
+      granularBuckets: 5
+    });
+
+    assert.equal(limiter.tryAcquire(1).allowed, true);
+
+    const start = Date.now();
+    const acquired = await limiter.acquire(1, 300);
+    const elapsed = Date.now() - start;
+
+    assert.equal(acquired, true);
+    assert.ok(elapsed >= 40, `Should take at least ~50ms to open, took ${elapsed}ms`);
   });
 });
 
