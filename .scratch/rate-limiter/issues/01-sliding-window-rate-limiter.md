@@ -1,5 +1,5 @@
-﻿# 01: Enterprise Sliding Window Rate Limiter and Circuit Breaker
-**Status:** done
+# 01: Enterprise Sliding Window Rate Limiter and Circuit Breaker
+**Status:** ready-for-agent
 **Blocked by:** None
 **Priority:** High
 **Owner:** 5090 Blackwell (:8877) + Double-Blind Audit (:8080)
