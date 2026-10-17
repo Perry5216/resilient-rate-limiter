@@ -1,0 +1,10 @@
+{
+  "name": "resilient-rate-limiter",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Enterprise Sliding Window Rate Limiter & Circuit Breaker with Microsecond Precision",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}
