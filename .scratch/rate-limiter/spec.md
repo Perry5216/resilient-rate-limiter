@@ -29,15 +29,20 @@ Two cooperating but cleanly separated modules behind small constructors:
 10. As a resilience engineer, I want HALF_OPEN to admit limited probes and require `halfOpenSuccessThreshold` consecutive successes to close, with any failure re-tripping immediately, so recovery is cautious.
 11. As an observer, I want `stateChange` (`{ from, to, timestamp }`), `trip`, `success`, `failure` events, so I can instrument and alert.
 12. As a tester, I want an injectable clock (ADR 0002) so every timing behavior is deterministic without wall-clock sleeps.
+13. As a service operator, I want `destroy()` on `SlidingWindowRateLimiter` to cancel timers, clear buckets, reject pending waiters with `Error('Rate limiter destroyed')`, and reject subsequent calls to ensure clean teardown.
+14. As an operator, I want `reset()` on `CircuitBreaker` to manually restore CLOSED state and purge failure buffer history.
+15. As a resilience engineer, I want `HALF_OPEN` probe concurrency bounded via `halfOpenMaxConcurrentProbes` (defaulting to `halfOpenSuccessThreshold`), fast-failing or executing fallback when probe capacity is saturated.
 
 ## Implementation Decisions
 
 - **Limiter state model:** `Map<bucketIndex, count>`; bucket width = `windowMs / granularBuckets`; eviction of buckets older than the window on every decision (bounded memory, per ADR 0001).
+- **Limiter lifecycle:** `destroy()` method sets `_destroyed = true`, clears timers/buckets, and rejects pending & future requests with `Error('Rate limiter destroyed')`.
 - **Clock seam:** optional `nowFn` constructor option on both components; default is `process.hrtime.bigint()`-derived fractional ms (microsecond precision). This is the single test seam (highest possible).
 - **`resetMs`:** ms until the oldest live bucket expires — the earliest moment capacity can reopen; `0` when capacity is already available.
 - **`acquire()` queue:** FIFO of waiters; when a denied `acquire` occurs, compute the earliest bucket-expiry time; drain queue at that time via the injected clock. Timeout uses the same clock; rejection message exactly `Rate limit acquire timed out`.
 - **Breaker failure window:** ring buffer of the last `minimumRequests` outcomes; percentage computed only when the ring is full; strict `>` comparison against `failureThresholdPct`.
-- **HALF_OPEN probe accounting:** consecutive-success counter; any probe failure → immediate trip; success threshold reached → CLOSED and ring reset.
+- **Breaker manual reset:** `reset()` method restores CLOSED state, clears the ring buffer, and resets active probe counters.
+- **HALF_OPEN probe accounting & concurrency:** consecutive-success counter; any probe failure → immediate trip; success threshold reached → CLOSED and ring reset. Concurrency bounded by `halfOpenMaxConcurrentProbes` (defaults to `halfOpenSuccessThreshold`), rejecting with `Error('Circuit breaker is HALF_OPEN and probe capacity is saturated')` (or invoking `fallbackFn`) when saturated.
 - **Events:** `stateChange` with `{ from, to, timestamp }` (timestamp from the injected clock), plus `trip`, `success`, `failure`.
 - **ESM only**, zero dependencies; `package.json` `"type": "module"`, `npm test` → `node --test`.
 

@@ -19,6 +19,7 @@ export class CircuitBreaker extends EventEmitter {
     minimumRequests = 5,
     recoveryTimeoutMs = 500,
     halfOpenSuccessThreshold = 2,
+    halfOpenMaxConcurrentProbes = null,
     nowFn = hrtimeMs
   } = {}) {
     super();
@@ -35,11 +36,15 @@ export class CircuitBreaker extends EventEmitter {
     if (!Number.isInteger(halfOpenSuccessThreshold) || halfOpenSuccessThreshold <= 0) {
       throw new Error('halfOpenSuccessThreshold must be a positive integer');
     }
+    if (halfOpenMaxConcurrentProbes !== null && (!Number.isInteger(halfOpenMaxConcurrentProbes) || halfOpenMaxConcurrentProbes <= 0)) {
+      throw new Error('halfOpenMaxConcurrentProbes must be a positive integer if provided');
+    }
 
     this.failureThresholdPct = failureThresholdPct;
     this.minimumRequests = minimumRequests;
     this.recoveryTimeoutMs = recoveryTimeoutMs;
     this.halfOpenSuccessThreshold = halfOpenSuccessThreshold;
+    this.halfOpenMaxConcurrentProbes = halfOpenMaxConcurrentProbes ?? halfOpenSuccessThreshold;
     this.nowFn = nowFn;
 
     this.state = CircuitState.CLOSED;
@@ -138,6 +143,13 @@ export class CircuitBreaker extends EventEmitter {
     }
 
     if (this.state === CircuitState.HALF_OPEN) {
+      if (this.activeHalfOpenProbes >= this.halfOpenMaxConcurrentProbes) {
+        const saturatedError = new Error('Circuit breaker is HALF_OPEN and probe capacity is saturated');
+        if (typeof fallbackFn === 'function') {
+          return await fallbackFn(saturatedError);
+        }
+        throw saturatedError;
+      }
       this.activeHalfOpenProbes++;
     }
 
@@ -196,5 +208,15 @@ export class CircuitBreaker extends EventEmitter {
       failures,
       failurePct
     };
+  }
+
+  /**
+   * Manually reset the circuit breaker to CLOSED and clear historical failure buffer.
+   */
+  reset() {
+    this.ringBuffer = [];
+    this.consecutiveHalfOpenSuccesses = 0;
+    this.activeHalfOpenProbes = 0;
+    this._transitionTo(CircuitState.CLOSED);
   }
 }

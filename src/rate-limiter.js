@@ -30,6 +30,7 @@ export class SlidingWindowRateLimiter {
     this.queue = [];
     /** @type {NodeJS.Timeout | null} */
     this._drainTimer = null;
+    this._destroyed = false;
   }
 
   _nowMs() {
@@ -66,8 +67,8 @@ export class SlidingWindowRateLimiter {
       if (count > 0 && index < oldestIndex) oldestIndex = index;
     }
     if (oldestIndex === Infinity) return 0;
-    const expiryMs = (oldestIndex + 1) * this.bucketWidthMs;
-    return Math.max(0, expiryMs - nowMs);
+    const expiryMs = oldestIndex * this.bucketWidthMs + this.windowMs;
+    return Math.max(0, Math.ceil(expiryMs - nowMs));
   }
 
   /**
@@ -76,6 +77,7 @@ export class SlidingWindowRateLimiter {
    * @returns {{ allowed: boolean, remaining: number, resetMs: number }}
    */
   tryAcquire(tokens = 1) {
+    if (this._destroyed) throw new Error('Rate limiter destroyed');
     if (!Number.isInteger(tokens) || tokens <= 0) throw new Error('tokens must be a positive integer');
     const nowMs = this._nowMs();
     const load = this._load(nowMs);
@@ -94,7 +96,7 @@ export class SlidingWindowRateLimiter {
    * Schedules next timer-driven queue drain based on earliest capacity opening or deadline.
    */
   _scheduleWakeup(deadlineMs = Infinity) {
-    if (this.queue.length === 0) return;
+    if (this._destroyed || this.queue.length === 0) return;
     if (this._drainTimer) {
       clearTimeout(this._drainTimer);
       this._drainTimer = null;
@@ -120,7 +122,7 @@ export class SlidingWindowRateLimiter {
    * Public queue evaluation: processes FIFO queue against current time.
    */
   drain() {
-    if (this.queue.length === 0) return;
+    if (this._destroyed || this.queue.length === 0) return;
     const nowMs = this._nowMs();
 
     while (this.queue.length > 0) {
@@ -151,6 +153,7 @@ export class SlidingWindowRateLimiter {
    * with Error('Rate limit acquire timed out') if `timeoutMs` expires.
    */
   async acquire(tokens = 1, timeoutMs = 5000) {
+    if (this._destroyed) return Promise.reject(new Error('Rate limiter destroyed'));
     if (!Number.isInteger(tokens) || tokens <= 0) throw new Error('tokens must be a positive integer');
 
     const immediate = this.tryAcquire(tokens);
@@ -167,6 +170,22 @@ export class SlidingWindowRateLimiter {
   getStats() {
     const nowMs = this._nowMs();
     const currentLoad = this._load(nowMs);
-    return { currentLoad, remaining: this.limit - currentLoad, limit: this.limit };
+    return { currentLoad, remaining: this.limit - currentLoad, limit: this.limit, isDestroyed: this._destroyed };
+  }
+
+  /**
+   * Release resources and reject pending queue waiters.
+   */
+  destroy() {
+    this._destroyed = true;
+    if (this._drainTimer) {
+      clearTimeout(this._drainTimer);
+      this._drainTimer = null;
+    }
+    while (this.queue.length > 0) {
+      const waiter = this.queue.shift();
+      waiter.reject(new Error('Rate limiter destroyed'));
+    }
+    this.buckets.clear();
   }
 }

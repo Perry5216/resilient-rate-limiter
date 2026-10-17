@@ -113,6 +113,66 @@ describe('SlidingWindowRateLimiter', () => {
     assert.equal(acquired, true);
     assert.ok(elapsed >= 40, `Should take at least ~50ms to open, took ${elapsed}ms`);
   });
+
+  it('accurately computes resetMs as the duration until oldest bucket slides out of window', () => {
+    let currentTime = 1000.0;
+    const limiter = new SlidingWindowRateLimiter({
+      limit: 2,
+      windowMs: 1000,
+      granularBuckets: 10,
+      nowFn: () => currentTime
+    });
+
+    // Exhaust limit at t=1000
+    limiter.tryAcquire(2);
+
+    // Over-limit attempt at t=1000: oldest bucket is at t=1000, expires at t=2000 -> resetMs = 1000
+    const over1 = limiter.tryAcquire(1);
+    assert.equal(over1.allowed, false);
+    assert.equal(over1.resetMs, 1000, 'resetMs at t=1000 should be 1000ms');
+
+    // Advance 400ms to t=1400: resetMs should be 600ms
+    currentTime = 1400;
+    const over2 = limiter.tryAcquire(1);
+    assert.equal(over2.allowed, false);
+    assert.equal(over2.resetMs, 600, 'resetMs at t=1400 should be 600ms');
+
+    // Advance past t=2000: capacity reopens
+    currentTime = 2000;
+    const allowed = limiter.tryAcquire(1);
+    assert.equal(allowed.allowed, true);
+    assert.equal(allowed.resetMs, 0);
+  });
+
+  it('destroy() terminates timer, aborts pending waiters, and rejects subsequent acquisitions', async () => {
+    let currentTime = 1000.0;
+    const limiter = new SlidingWindowRateLimiter({
+      limit: 1,
+      windowMs: 1000,
+      nowFn: () => currentTime
+    });
+
+    limiter.tryAcquire(1);
+    const queuedPromise = limiter.acquire(1, 5000);
+
+    limiter.destroy();
+
+    await assert.rejects(queuedPromise, {
+      name: 'Error',
+      message: 'Rate limiter destroyed'
+    });
+
+    // Subsequent calls must immediately reject/throw
+    assert.throws(() => limiter.tryAcquire(1), {
+      name: 'Error',
+      message: 'Rate limiter destroyed'
+    });
+
+    await assert.rejects(limiter.acquire(1), {
+      name: 'Error',
+      message: 'Rate limiter destroyed'
+    });
+  });
 });
 
 describe('CircuitBreaker', () => {
@@ -236,5 +296,74 @@ describe('CircuitBreaker', () => {
     // Probe failure
     await assert.rejects(breaker.execute(async () => { throw new Error('Probe failed'); }));
     assert.equal(breaker.getState(), CircuitState.OPEN, 'Must immediately trip to OPEN on probe failure');
+  });
+
+  it('throttles probe concurrency in HALF_OPEN when saturated', async () => {
+    let currentTime = 1000.0;
+    const breaker = new CircuitBreaker({
+      failureThresholdPct: 50,
+      minimumRequests: 2,
+      recoveryTimeoutMs: 500,
+      halfOpenSuccessThreshold: 1, // Only 1 concurrent probe allowed
+      nowFn: () => currentTime
+    });
+
+    await assert.rejects(breaker.execute(async () => { throw new Error('Fail'); }));
+    await assert.rejects(breaker.execute(async () => { throw new Error('Fail'); }));
+
+    currentTime += 600;
+    assert.equal(breaker.getState(), CircuitState.HALF_OPEN);
+
+    // Start a probe that stays pending
+    let resolveProbe;
+    const pendingProbePromise = breaker.execute(() => new Promise((res) => { resolveProbe = res; }));
+
+    // Second concurrent request should be rejected as probe saturated
+    await assert.rejects(
+      breaker.execute(async () => 'BURST'),
+      { name: 'Error', message: 'Circuit breaker is HALF_OPEN and probe capacity is saturated' }
+    );
+
+    // Fallback should work when saturated
+    const fallbackResult = await breaker.execute(
+      async () => 'BURST',
+      async (err) => `HANDLED_${err.message}`
+    );
+    assert.equal(fallbackResult, 'HANDLED_Circuit breaker is HALF_OPEN and probe capacity is saturated');
+
+    // Resolve the active probe
+    resolveProbe('SUCCESS');
+    await pendingProbePromise;
+    assert.equal(breaker.getState(), CircuitState.CLOSED);
+  });
+
+  it('allows manual reset to CLOSED state and purges historical failure metrics', async () => {
+    let currentTime = 1000.0;
+    const breaker = new CircuitBreaker({
+      failureThresholdPct: 50,
+      minimumRequests: 2,
+      nowFn: () => currentTime
+    });
+
+    await assert.rejects(breaker.execute(async () => { throw new Error('Fail'); }));
+    await assert.rejects(breaker.execute(async () => { throw new Error('Fail'); }));
+    assert.equal(breaker.getState(), CircuitState.OPEN);
+
+    breaker.reset();
+    assert.equal(breaker.getState(), CircuitState.CLOSED);
+    assert.deepEqual(breaker.getMetrics(), {
+      state: CircuitState.CLOSED,
+      totalRecorded: 0,
+      successes: 0,
+      failures: 0,
+      failurePct: 0
+    });
+
+    // Single failure after reset must not re-trip because minimumRequests = 2
+    await assert.rejects(breaker.execute(async () => { throw new Error('Subsequent fault'); }));
+    assert.equal(breaker.getState(), CircuitState.CLOSED, 'Should remain CLOSED because only 1 request recorded');
+
+    const result = await breaker.execute(async () => 'RECOVERED');
+    assert.equal(result, 'RECOVERED');
   });
 });
